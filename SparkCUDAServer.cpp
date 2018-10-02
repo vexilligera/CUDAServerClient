@@ -17,6 +17,7 @@
 typedef struct _SwapBuffer {
 	std::string fileName;
 	int fd;
+	unsigned long size;
 	void *mapped;
 } SwapBuffer, *pSwapBuffer;
 
@@ -28,7 +29,6 @@ private:
 	int deviceCount = 0;
 	int activeDevice = -1;
 	int port = 0;
-	static const int PAGE_SIZE = 4096;
 	static const int MAX_LENGTH = 1024;
 	static const int MAX_THREADS = 1024;
 	std::vector<cudaDeviceProp> deviceProps;
@@ -64,9 +64,12 @@ void SparkCUDAServer::messageLoop(int listenfd) {
 	int n, connfd, fd;
 	void *ptr;
 	SwapBuffer sb;
+	struct stat st;
 	char buffer[SparkCUDAServer::MAX_LENGTH];
-	cout << "SparkCUDAServer: listening on port " << port << endl;
+	const std::string okResponse("OK");
+	std::vector<SwapBuffer>::iterator idx;
 	rapidjson::Document doc;
+	cout << "SparkCUDAServer: listening on port " << port << endl;
 	while (true) {
 		connfd = accept(listenfd, nullptr, nullptr);
 		if (connfd == -1)
@@ -75,11 +78,14 @@ void SparkCUDAServer::messageLoop(int listenfd) {
 		buffer[n] = '\0';
 		doc.Parse(buffer);
 		std::string message =  doc["message"].GetString();
+		int msgType = doc["messageType"].GetInt();
 
-		switch (doc["messageType"].GetInt()) {
+		switch (msgType) {
 		case 0:	// establish connection
 			fd = open(message.c_str(), O_RDWR);
-			ptr = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+			fstat(fd, &st);
+			ptr = mmap(0, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+			cudaHostRegister(ptr, st.st_size, cudaHostRegisterDefault);
 			if (ptr == MAP_FAILED) {
 				send(connfd, "\0", 1, 0);
 				cout << "SparkCUDAServer: failed to create swap." << endl;
@@ -89,15 +95,17 @@ void SparkCUDAServer::messageLoop(int listenfd) {
 				sb.fd = fd;
 				sb.fileName = message;
 				sb.mapped = ptr;
+				sb.size = st.st_size;
 				swapBuffer.push_back(sb);
 				cout << "SparkCUDAServer: connection established for " << message << endl;
 			}
 			break;
-		case 1: // swap to GPU
+		case 1:case 2:
 			sb.fileName = "";
 			for (auto i = swapBuffer.begin(); i != swapBuffer.end(); ++i) {
 				if (i->fileName == message) {
 					sb = *i;
+					idx = i;
 					break;
 				}
 			}
@@ -105,8 +113,18 @@ void SparkCUDAServer::messageLoop(int listenfd) {
 				cout << "SparkCUDAServer: swap file not found." << endl;
 				break;
 			}
-			cout << (char*)sb.mapped << endl;
-			cout << "SparkCUDAServer: copied data from " << message << " to GPU" << endl;
+			if (msgType == 1) {	// swap to GPU
+				send(connfd, okResponse.c_str(), okResponse.length(), 0);
+				cout << "SparkCUDAServer: copied data from " << message << " to GPU" << endl;
+			}
+			else {	// close connection
+				munmap(sb.mapped, sb.size);
+				close(sb.fd);
+				cudaHostUnregister(sb.mapped);
+				swapBuffer.erase(idx);
+				send(connfd, okResponse.c_str(), okResponse.length(), 0);
+				cout << "SparkCUDAServer: released " << sb.fileName << " resources." << endl;
+			}
 			break;
 		default:
 			break;
@@ -155,11 +173,10 @@ SparkCUDAServer::SparkCUDAServer(int port=2333, int deviceNum=-1) {
 }
 
 SparkCUDAServer::~SparkCUDAServer() {
-	struct stat st;
 	for (auto &i : swapBuffer) {
-		fstat(i.fd, &st);
-		munmap(i.mapped, st.st_size);
 		close(i.fd);
+		cudaHostUnregister(i.mapped);
+		munmap(i.mapped, i.size);
 	}
 	for (auto i = threadPool.begin(); i != threadPool.end(); ++i)
 		i->detach();
