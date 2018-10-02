@@ -78,6 +78,11 @@ public class SparkCUDAClient {
 		}
 	}
 
+	public void close() {
+		SparkCUDAMessage msgClose = new SparkCUDAMessage(SparkCUDAMessage.Close, fileName);
+		notifyServer(msgClose);
+	}
+
 	// copy from memory to GPU memory
 	public void swapToGPU(byte[] data) {
 		buffer.put(data);
