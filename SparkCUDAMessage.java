@@ -6,6 +6,7 @@ public class SparkCUDAMessage implements Serializable {
 
 	public static int Connect = 0;
 	public static int Swap = 1;
+	public static int Close = 2;
 
 	public SparkCUDAMessage(int messageType, String message) {
 		super();
